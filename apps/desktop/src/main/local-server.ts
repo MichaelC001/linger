@@ -4577,7 +4577,26 @@ export class LocalServerModule implements Module {
     } else {
       this.#localModelsDegraded = undefined;
     }
-    this.#adoptRuntime(outcome.runtime);
+    const restoredLocalModels = Array.isArray(
+      outcome.details?.restoredLocalModels,
+    )
+      ? outcome.details.restoredLocalModels.filter(
+          (item): item is string => typeof item === "string" && item.length > 0,
+        )
+      : [];
+    const localModelsRestored =
+      outcome.details?.localModelsRestored === true ||
+      restoredLocalModels.length > 0;
+    const adoptedRuntime = this.#adoptRuntime(outcome.runtime);
+    if (localModelsRestored) {
+      this.#ctx?.log.info("local_server.local_models_restored", {
+        ...(restoredLocalModels.length ? { models: restoredLocalModels } : {}),
+      });
+      // When services were already running, the Computer Daemon may have
+      // probed `library status` while quit-unloaded models were still idle.
+      // Signal a restart/refresh when `#adoptRuntime` did not already do so.
+      if (!adoptedRuntime) this.#ctx?.bus.emit("computer.runtime");
+    }
     const { source, origin } = outcome.details ?? {};
     return {
       ...(typeof source === "string" ? { source } : {}),
@@ -4598,7 +4617,7 @@ export class LocalServerModule implements Module {
   // Every resume reports the runtime and localmodels tool paths, so an
   // install from before the Computer knew one gains it. A change restarts
   // the Computer once its running tasks end.
-  #adoptRuntime(runtime: InstanceRuntime | undefined): void {
+  #adoptRuntime(runtime: InstanceRuntime | undefined): boolean {
     const ctx = this.#ctx;
     if (
       !ctx ||
@@ -4608,20 +4627,21 @@ export class LocalServerModule implements Module {
         (value) => typeof value !== "string",
       )
     )
-      return;
+      return false;
     if (
       isDeepStrictEqual(
         ctx.config.get().runtimeEnvironment ?? {},
         runtime.environment,
       )
     )
-      return;
+      return false;
     ctx.config.update({ runtimeEnvironment: runtime.environment });
     ctx.log.info("local_server.runtime", {
       runtime: runtime.setupChoice,
       keys: Object.keys(runtime.environment),
     });
     ctx.bus.emit("computer.runtime");
+    return true;
   }
 
   // Reads the desktop instance's current origin from instance.json via the
@@ -4778,6 +4798,10 @@ interface ResumeOutcome {
     byokGateway?: unknown;
     // Why local models did not come back on resume: `{ code, message, reasons? }`.
     localModelsDegraded?: unknown;
+    // Set when resume revived the local stack or reloaded library models.
+    localModelsRestored?: unknown;
+    // Library model IDs reloaded during resume.
+    restoredLocalModels?: unknown;
   };
   runtime?: InstanceRuntime;
   // Resume stderr is not piped (detached services could hold it open), so
